@@ -1,0 +1,23 @@
+---
+title: "Untitled"
+author: "Remi Daigle, Isaac Fine, Diane Masson, Frederick Guichard, Marie-Josee Fortin"
+output: pdf_document
+---
+
+```{r,echo=FALSE, results='hide',warning=FALSE, message=FALSE}
+source("R/packages.R")
+source("R/load_summary_data.R")
+# source("infomap.R") # turned off to save time, remember to change path and install infomap
+source("R/fig1.R")
+source("R/fig2.R")
+source("R/fig3.R")
+source("R/fig4.R")
+```
+
+![](../figures/fig1.png)
+
+![](../figures/fig2.png)
+
+![](../figures/fig3.png)
+
+![](../figures/fig4.png)

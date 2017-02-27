@@ -1,0 +1,6 @@
+---
+title: "The effects of climate change on the dispersal of larval invertebrates in British Columbia"
+author: "Remi Daigle"
+---
+
+> **Reminder**: install Infomap (http://www.mapequation.org/code.html#Installation) and change path to appropriate directory in fig4.R
