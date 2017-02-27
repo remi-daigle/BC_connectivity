@@ -45,7 +45,11 @@ pA <- ggplot(all_summary,aes(x=pld,y=inseadist/1000,color=climate))+
     geom_line(mapping=aes(x=pld,y=inseadist/1000),data=bestfitlines[bestfitlines$climate=="Future PLD-corrected",])+
     theme_classic()+ 
     theme(axis.line.x = element_line(colour = "grey50"),axis.line.y = element_line(colour = "grey50"))+
-    labs(x="PLD (days)", y="Mean Dispersal Distance (km)")
+    labs(x="PLD (days)", y="Mean Dispersal Distance (km)")+
+    scale_colour_manual(name = "Climate Scenario",values = c("#66c2a5", "#8da0cb", "#fc8d62"))+
+    guides(colour=guide_legend(override.aes = list(
+        fill = c("#66c2a5", "transparent", "#fc8d62"),
+        shape = c(16,NA,16))))
 
 #panel B
 coef(lm(nodes~0+sqrt(pld),data=all_summary))
@@ -82,7 +86,11 @@ pB <- ggplot(all_summary,aes(x=pld,y=nodes,color=climate))+
     geom_line(mapping=aes(x=pld,y=nodes),data=bestfitlines[bestfitlines$climate=="Future PLD-corrected",])+
     theme_classic()+ 
     theme(axis.line.x = element_line(colour = "grey50"),axis.line.y = element_line(colour = "grey50"))+
-    labs(x="PLD (days)", y="Mean Connected Nodes")
+    labs(x="PLD (days)", y="Mean Connected Nodes")+
+    scale_colour_manual(name = "Climate Scenario",values = c("#66c2a5", "#8da0cb", "#fc8d62"))+
+    guides(colour=guide_legend(override.aes = list(
+        fill = c("#66c2a5", "transparent", "#fc8d62"),
+        shape = c(16,NA,16))))
 
 
 png("./figures/fig2.png",width=18,height=18,units="cm",res=500)
