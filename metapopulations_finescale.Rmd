@@ -1,0 +1,421 @@
+---
+title: "metapopulations"
+output: html_document
+---
+
+```{r}
+# devtools::install_github("guiblanchet/HMSC")
+require(HMSC)
+require(sdmpredictors)
+require(sf)
+require(tidyverse)
+require(igraph)
+require(ggplot2)
+library(readr)
+
+```
+
+```{r,cache=TRUE}
+proj <- "+proj=lcc +lat_1=77 +lat_2=49 +lat_0=49 +lon_0=-95 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs "
+
+# grid_boxes <- st_read("shapefiles/grid_boxes.shp") %>% st_transform(proj)
+habitat <- st_read("shapefiles/habitat_0to250m.shp") %>% st_buffer(dist=0) %>% st_transform(proj)
+# grid_boxes$ID <- paste0("gb",1:nrow(grid_boxes))
+
+# grid <- st_intersection(habitat,grid_boxes) %>%
+    # st_cast("MULTIPOLYGON")
+
+######### Environmental ########################
+layers_future <- list_layers_future(terrestrial=FALSE,marine=TRUE) %>% 
+    filter(scenario=="A2")
+layers <- list_layers(terrestrial=FALSE,marine=TRUE) %>% 
+    filter(layer_code %in% layers_future$current_layer_code)
+
+
+habitat_ll <- habitat %>%
+    st_transform("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0") %>%
+    as("Spatial")
+enviro_raster <- load_layers(layers$layer_code,datadir=paste0(getwd(),"/data/SDM/")) %>% 
+    crop(habitat_ll) %>% 
+    mask(habitat_ll)
+
+raster_grid <- rasterToPolygons(enviro_raster) %>% 
+    st_as_sf() %>% 
+    st_transform("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0") %>% 
+    select(geometry)
+
+enviro_raw <- raster::extract(enviro_raster, rasterToPolygons(enviro_raster), fun = mean, na.rm = T)
+
+enviro_raster_future <- load_layers(layers_future$layer_code,datadir=paste0(getwd(),"/data/SDM/")) %>% 
+    crop(habitat_ll) %>% 
+    mask(habitat_ll)
+
+enviro_raw_future <- raster::extract(enviro_raster_future, rasterToPolygons(enviro_raster), fun = mean, na.rm = T)
+```
+
+
+```{r}
+memory.limit(16304*2)
+
+#### loop for years ####
+wd <- 'E:/Positions/processed/'
+filenames <- list.files(wd, pattern=glob2rx("*G_data_*"), full.names=F,recursive=F)
+# filenames <- filenames[2]
+for(fn in filenames){
+    #### open tabulated output data and grid shapefile ####
+    type <- substr(fn,1,1)
+    year <- substr(fn,8,11)
+    pld <- substr(fn,17,nchar(fn)-4)
+    if(pld %in% c(8,29,64,120)){
+        #### open tabulated output data ####
+        print(paste(type,year,pld))
+        if(!file.exists(paste0("data/fine_con_mat/con_mat_per_",type,year,"_pld_",pld,".csv"))){
+            G_data <- read_csv(paste0(wd,fn),col_names = TRUE) %>% 
+                select(long,lat,long0,lat0)
+            
+            
+            #### determine settlement location for each larvae ####
+            settle_loc <- G_data %>% 
+                select(long,lat) %>% 
+                st_as_sf(coords = c("long", "lat"),crs= "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+            
+            release_loc <- G_data %>% 
+                select(long0,lat0) %>% 
+                st_as_sf(coords = c("long0", "lat0"),crs= "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+            
+            G_data$settle_site <- st_intersects(settle_loc,raster_grid)
+            G_data$release_site <- st_intersects(release_loc,raster_grid)
+            
+            totals <- factor(G_data$release_site,levels=row.names(raster_grid)) %>% table()
+            
+            G_data$settle_site <- factor(
+                sapply(G_data$settle_site,function(x) ifelse(length(x)==0,NA,x[[1]])),
+                levels=row.names(raster_grid)
+            )            
+            G_data$release_site <- factor(
+                sapply(G_data$release_site,function(x) ifelse(length(x)==0,NA,x[[1]])),
+                levels=row.names(raster_grid)
+            )  
+            
+            #### create matrix ####
+            # number released from each site
+            
+            con_mat <- as.data.frame.matrix(table(G_data$release_site,G_data$settle_site))
+            
+            con_mat_per <- con_mat/totals
+            con_mat_per[is.na(con_mat_per)] <- 0
+            
+            print(paste('writing',type,year,pld, which(filenames==fn)))
+            write.csv(con_mat_per,paste0("data/fine_con_mat/con_mat_per_",type,year,"_pld_",pld,".csv"))
+        }
+    }
+}
+```
+
+
+```{r,cache=TRUE}
+#### load OBIS data ####
+
+# source("get_OBIS.R")
+OBIS_raw <- st_as_sf(read_csv("obis_BC_eez.csv"),
+                 coords = c("decimalLongitude", "decimalLatitude"),
+                 crs="+proj=longlat +datum=WGS84") %>%
+    st_transform(proj)
+
+raster_grid <- raster_grid%>%
+    st_transform(proj)
+
+usable <- OBIS_raw %>%
+    filter(!is.na(species)) %>% 
+    mutate(gridID=st_covered_by(.,raster_grid)) %>% #remove records not in the habitat grid
+    filter(lengths(gridID)>0) %>% 
+    mutate(gridID=sapply(gridID,FUN=function(x) ifelse(length(x)==0,NA,x[[1]]))) %>% 
+    data.frame() %>%
+    # filter(phylum!="Chordata",!is.na(species)) %>% 
+    group_by(species) %>%
+    summarize(records=n(),gridID=list(gridID)) %>%
+    filter(records>50,lengths(gridID)>5) %>%
+    dplyr::select(species,gridID) %>%
+    ungroup()
+
+OBIS <- OBIS_raw %>% 
+    filter(species %in% usable$species)
+rm(OBIS_raw)
+
+gridIDs <- data.frame(gridID=as.numeric(row.names(raster_grid)),stringsAsFactors = F)
+
+# Overlay occurrences on grid
+sp_abun_raw <- OBIS  %>%
+    filter(!is.na(species)) %>%
+    mutate(gridID=st_covered_by(.,raster_grid)) %>%
+    mutate(gridID=sapply(gridID,FUN=function(x) ifelse(length(x)==0,NA,x[[1]]))) %>% 
+    data.frame() %>% 
+    group_by(gridID,species) %>%
+    summarize(records=n()) %>%
+    spread(species,records,fill=0) %>% 
+    filter(!is.na(gridID)) %>% 
+    left_join(gridIDs,., by = "gridID") %>% 
+    column_to_rownames("gridID") %>% 
+    as.matrix()
+
+sp_abun_raw[is.na(sp_abun_raw)] <- 0    
+
+
+    
+sp_pres_raw <- (sp_abun_raw>0) %>%
+    data.frame() %>%
+    sapply(as.numeric)
+```
+
+
+```{r,cache=TRUE}
+########## removeNAs and useless ######################
+removeNA <-  enviro_raw %>%
+    is.na() %>% 
+    which(.,arr.ind = T) %>% 
+    data.frame() %>% 
+    dplyr::select(row) %>% 
+    unique() %>% 
+    unlist()
+
+useless <- (apply(as.matrix(enviro_raw),2,var,na.rm = TRUE)==0) %>% which()
+
+if(length(removeNA)!=0&length(useless)!=0){
+     enviro <- enviro_raw[-removeNA,-useless]
+     enviro_future <- enviro_raw_future[-removeNA,-useless]
+     sp_abun <- sp_abun_raw[-removeNA,]
+     sp_pres <- sp_pres_raw[-removeNA,]
+} else if(length(removeNA)!=0){
+    enviro <- enviro_raw[-removeNA,]
+    enviro_future <- enviro_raw_future[-removeNA,]
+    sp_abun <- sp_abun_raw[-removeNA,]
+    sp_pres <- sp_pres_raw[-removeNA,]
+} else if(length(useless)!=0){
+    enviro <- enviro_raw[,-useless]
+    enviro_future <- enviro_raw_future[,-useless]
+    sp_abun <- sp_abun_raw
+    sp_pres <- sp_pres_raw
+} else {
+    enviro <- enviro_raw
+    enviro_future <- enviro_raw_future
+    sp_abun <- sp_abun_raw
+    sp_pres <- sp_pres_raw
+}
+
+```
+
+```{r,cache=TRUE}
+# Creating HMSC dataset for analyses
+HMSCdata <- as.HMSCdata(Y = sp_abun,
+                        X = enviro,
+                        Random = data.frame(sampling_unit = row.names(raster_grid)))
+
+
+rm(model)
+rm(HMSCpred)
+gc()
+model <- hmsc(HMSCdata)
+
+# future
+colnames(enviro_future) <- colnames(enviro)
+HMSCdata_future <- as.HMSCdata(Y = sp_abun,
+                        X = enviro_future,
+                        Random = data.frame(sampling_unit = row.names(raster_grid)))
+
+```
+
+```{r,cache=TRUE}
+# Generate predictions
+HMSCpred <- cbind(raster_grid,predict(model))
+
+# more.rows <- data.frame(ID=paste0("gb",sprintf("%03d", removeNA)), row.names = removeNA, stringsAsFactors=F)
+# HMSCpred[(nrow(HMSCpred) + 1):(nrow(HMSCpred) + nrow(more.rows)), names(more.rows)] <- more.rows
+# HMSCpred <- HMSCpred[order(as.numeric(substring(HMSCpred$ID,3))),]
+
+# future
+HMSCpred_future <- cbind(raster_grid,predict(model,HMSCdata_future))
+
+# more.rows <- data.frame(ID=paste0("gb",sprintf("%03d", removeNA)), row.names = removeNA, stringsAsFactors=F)
+# HMSCpred_future[(nrow(HMSCpred_future) + 1):(nrow(HMSCpred_future) + nrow(more.rows)), names(more.rows)] <- more.rows
+# HMSCpred_future <- HMSCpred_future[order(as.numeric(substring(HMSCpred_future$ID,3))),]
+
+```
+
+```{r,cache=TRUE}
+#### load con_mat data ####
+filenames <- list.files("data/fine_con_mat", pattern="con_mat_per_.", full.names=F,recursive=F)
+
+con_mat_data <- lapply(filenames,function(x) as.matrix(assign(substr(x,1,nchar(x)-4),read.csv(paste0("data/fine_con_mat/",x),row.names=1))))
+con_mat_data <- simplify2array(con_mat_data)
+con_mat_data_legend <- matrix(unlist(sapply(filenames,strsplit,"_")),nrow=length(filenames),byrow=T)
+con_mat_data_legend <- data.frame(cbind(type=substr(con_mat_data_legend[,4],1,1),
+                                year=substr(con_mat_data_legend[,4],2,5),
+                                PLD=substr(con_mat_data_legend[,6],1,nchar(con_mat_data_legend[,6])-4),
+                                time="Present"),
+                          stringsAsFactors=FALSE)
+con_mat_data_legend$time[con_mat_data_legend$year>2015] <- "Future"
+
+# function to get the right matrices
+get_matrix_fun <- function(con_mat_data,con_mat_data_legend,year=c(1998:2007,2098:2107),time=c("Present","Future"),PLD=c(0:17*7+1),FUN){
+    apply(con_mat_data[,,con_mat_data_legend$year%in%year&
+                   con_mat_data_legend$PLD%in%PLD&
+                   con_mat_data_legend$time%in%time], c(1,2), FUN)
+}
+```
+
+
+```{r,cache=TRUE}
+# resistance matrix
+# x=t(data.matrix(select(HMSCpred,-ID,-X.NA.,-geometry)))
+# c <- cor(x,use = "pairwise.complete.obs")
+
+HMSCpredsp <- HMSCpred %>% 
+    data.frame() %>% 
+    select(-geometry)
+
+HMSCpredsp_future <- HMSCpred_future %>% 
+    data.frame() %>% 
+    select(-geometry)
+
+# growth_data <- expand.grid(species = names(HMSCpredsp),
+#                     prioritization = c("rand","hab","dist","mod","dist_hab","mod_hab"),
+#                     pld = c(8,29,64,120),
+#                     reference = c("Present","Future"),
+#                     growth=NA)
+load("growth_data.RData")
+
+
+# Connectivity
+# 'treatment' connectivity
+# distance based
+distanceMatrix <- st_distance(st_centroid(raster_grid))
+
+probabilityMatrix_distance <- 1/distanceMatrix^2
+probabilityMatrix_distance[is.infinite(probabilityMatrix_distance)] <- 0
+
+# length(unique(growth_data$species))
+# species <- sample(as.character(unique(growth_data$species)),20)
+species <- unique(growth_data$species)
+
+for(pld in unique(growth_data$pld)){
+    if(all(!is.na(growth_data$growth[growth_data$pld==pld]))) next()
+    # Connectivity
+    # 'real' connectivity based on model
+    for(r in unique(growth_data$reference)){
+        if(all(!is.na(growth_data$growth[growth_data$pld==pld&
+                                         growth_data$reference==r]))) next()
+        probabilityMatrix_reference <- get_matrix_fun(con_mat_data,con_mat_data_legend,time=r,PLD=as.numeric(pld),FUN='mean')
+        
+        for(sp in species){
+            if(all(!is.na(growth_data$growth[growth_data$pld==pld&
+                                             growth_data$reference==r&
+                                             growth_data$species==sp]))) next()
+            
+            if(r=="Present"){
+                survival_reference <- as.numeric(unlist(HMSCpredsp[sp]))
+            } else {
+                survival_reference <- as.numeric(unlist(HMSCpredsp_future[sp]))
+            }
+            survival_reference[is.na(survival_reference)] <- 0
+            # fecundity for reference
+            fecundity_reference <- 1/Re(eigen(t(t(probabilityMatrix_reference)*survival_reference))$values[1])
+            flowMatrix_reference <- t(t(probabilityMatrix_reference)*survival_reference)*fecundity_reference
+            
+            for(p in unique(growth_data$prioritization)){
+                if(all(!is.na(growth_data$growth[growth_data$pld==pld&
+                                                 growth_data$reference==r&
+                                                 growth_data$species==sp&
+                                                 growth_data$prioritization==p]))) next()
+                if(substring(p,nchar(p)-2)=="hab"){
+                    survival <- as.numeric(unlist(HMSCpredsp[sp]))
+                    survival[is.na(survival)] <- 0
+                } else {
+                    survival <- rep(1,nrow(HMSCpred))
+                }
+                
+                # 'treatment' connectivity
+                if(substring(p,1,4)=="dist"){
+                    # distance based
+                    probabilityMatrix <- probabilityMatrix_distance
+                } else if(substring(p,1,3)=="mod") {
+                    # model based
+                    if(r=="Present"){
+                        probabilityMatrix <- probabilityMatrix_reference
+                    } else {
+                        probabilityMatrix <- get_matrix_fun(con_mat_data,con_mat_data_legend,time="Future",PLD=as.numeric(pld),FUN='mean')
+                    }
+                } else {
+                    probabilityMatrix <- matrix(1,nrow=nrow(probabilityMatrix_reference),ncol=ncol(probabilityMatrix_reference))
+                }
+                # fecundity for treatment
+                fecundity <- 1/Re(eigen(t(t(probabilityMatrix)*survival))$values[1])
+                flowMatrix <- t(t(probabilityMatrix)*survival)*fecundity
+                
+                # Marxan selection type
+                if(p=="hab"){
+                    # select randomly in top %50
+                    inreserve <- survival>quantile(survival,c(.50))
+                    inreserve[inreserve] <- sample(c(TRUE,FALSE),length(inreserve[inreserve]),replace=TRUE,prob=c(0.20,0.80))
+                } else if(p=="rand") {
+                    inreserve <- sample(c(TRUE,FALSE),nrow(flowMatrix),replace=TRUE,prob=c(0.10,0.90))
+                } else {
+                    g <- graph_from_adjacency_matrix(flowMatrix,weighted=TRUE)
+                    centrality <- eigen_centrality(g)
+                    inreserve <- centrality$vector>quantile(centrality$vector,c(.90))
+                }
+                
+                # calculate growth rate
+                networkmatrix <- (flowMatrix_reference)[inreserve,inreserve]
+                growth_data$growth[growth_data$species==sp&
+                                       growth_data$pld==pld&
+                                       growth_data$prioritization==p&
+                                       growth_data$reference==r
+                                   ] <- Re(eigen(networkmatrix)$values[1])
+                print(paste(pld,sp,p,r))
+                save(growth_data,file="growth_data.RData")
+                
+            }
+        }
+    }
+}
+
+```
+
+```{r,cache=TRUE}
+# growth_data <- growth_data %>% 
+#     mutate(Type = paste(ifelse(connectivity=="dist","Distance",ifelse(connectivity=="mod","Model","")),
+#                                        ifelse(habitat==TRUE,"+ Habitat","")))
+
+ggplot(growth_data,aes(x=prioritization,y=growth, fill=reference))+
+    geom_boxplot()+
+    labs(x = "Prioritization Type",
+         y = "Relative Metapopulation Growth")+
+    scale_fill_brewer(type="qual",palette = "Paired")+
+    theme_classic()
+```
+
+
+```{r,cache=TRUE}
+# select all *hab and plot x=pld, facet=prioritization
+
+# growth_data <- growth_data %>% 
+#     mutate(Type = paste(ifelse(connectivity=="dist","Distance",ifelse(connectivity=="mod","Model","")),
+#                                        ifelse(habitat==TRUE,"+ Habitat","")))
+
+ggplot(growth_data %>% 
+           filter(grepl("*hab",prioritization)),
+       aes(x=as.factor(pld),y=growth,fill=reference))+
+    geom_boxplot()+
+    labs(x = "Prioritization Type",
+         y = "Relative Metapopulation Growth")+
+    scale_fill_brewer(type="qual",palette = "Paired")+
+    facet_grid(~prioritization)
+    theme_classic()
+```
+
+```{r}
+# resistance matrix
+x=t(data.matrix(select(HMSCpred,-ID,-X.NA.,-geometry)))
+c <- cor(t(HMSCpredsp),use = "pairwise.complete.obs")
+```
+

@@ -1,0 +1,318 @@
+---
+title: "metapopulations"
+output: html_document
+---
+
+```{r}
+# devtools::install_github("guiblanchet/HMSC")
+require(HMSC)
+require(sdmpredictors)
+require(sf)
+require(tidyverse)
+require(igraph)
+require(ggplot2)
+```
+```{r,cache=TRUE}
+proj <- "+proj=lcc +lat_1=77 +lat_2=49 +lat_0=49 +lon_0=-95 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs "
+
+grid_boxes <- st_read("shapefiles/grid_boxes.shp") %>% st_transform(proj)
+habitat <- st_read("shapefiles/habitat_0to250m.shp") %>% st_buffer(dist=0) %>% st_transform(proj)
+grid_boxes$ID <- paste0("gb",1:nrow(grid_boxes))
+
+grid <- st_intersection(habitat,grid_boxes) %>%
+    st_cast("MULTIPOLYGON")
+
+######### Environmental ########################
+layers_future <- list_layers_future(terrestrial=FALSE,marine=TRUE) %>% 
+    filter(scenario=="A2")
+layers <- list_layers(terrestrial=FALSE,marine=TRUE) %>% 
+    filter(layer_code %in% layers_future$current_layer_code)
+
+
+grid_boxes_ll <- grid_boxes %>%
+    st_transform("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0") %>%
+    as("Spatial")
+enviro_raster <- load_layers(layers$layer_code,datadir=paste0(getwd(),"/data/SDM/")) %>% 
+    crop(grid_boxes_ll) %>% 
+    mask(grid_boxes_ll)
+
+enviro_raw <- raster::extract(enviro_raster, grid_boxes_ll, fun = mean, na.rm = T)
+
+enviro_raster_future <- load_layers(layers_future$layer_code,datadir=paste0(getwd(),"/data/SDM/")) %>% 
+    crop(grid_boxes_ll) %>% 
+    mask(grid_boxes_ll)
+
+enviro_raw_future <- raster::extract(enviro_raster_future, grid_boxes_ll, fun = mean, na.rm = T)
+```
+
+
+```{r,cache=TRUE}
+#### load OBIS data ####
+memory.limit(16304*4)
+
+# source("get_OBIS.R")
+OBIS_raw <- st_as_sf(read_csv("obis_BC_eez.csv"),
+                 coords = c("decimalLongitude", "decimalLatitude"),
+                 crs="+proj=longlat +datum=WGS84") %>%
+    st_transform(proj)
+
+usable <- OBIS_raw %>%
+    mutate(gridID=st_covered_by(.,grid)) %>% #remove records not in the habitat grid
+    filter(lengths(gridID)>0) %>% 
+    mutate(gridID=grid$ID.1[unlist(gridID)]) %>% 
+    data.frame() %>%
+    # filter(phylum!="Chordata",!is.na(species)) %>% 
+    group_by(species) %>%
+    summarize(records=n(),gridID=list(gridID)) %>%
+    filter(records>50,lengths(gridID)>5) %>%
+    dplyr::select(species,gridID) %>%
+    ungroup()
+
+OBIS <- OBIS_raw %>% 
+    filter(species %in% usable$species)
+rm(OBIS_raw)
+# Overlay occurrences on grid
+sp_abun_raw <- st_within(OBIS,grid_boxes,sparse=FALSE) %>% 
+    data.frame() %>% 
+    setNames(grid_boxes$ID) %>% 
+    bind_cols(OBIS,.) %>%
+    data.frame() %>% 
+    dplyr::select(species,starts_with("gb")) %>% 
+    gather(gridID,overlaps,starts_with("gb")) %>% 
+    group_by(species,gridID) %>% 
+    summarize(obs=sum(overlaps)) %>% 
+    ungroup() %>% 
+    spread(species,obs) %>% 
+    remove_rownames() %>% 
+    as.data.frame() %>% 
+    column_to_rownames("gridID")%>%
+    sapply(as.numeric) %>% 
+    as.matrix()
+
+sp_pres_raw <- (sp_abun_raw>0) %>%
+    data.frame() %>%
+    sapply(as.numeric)
+```
+
+
+```{r,cache=TRUE}
+########## removeNAs and useless ######################
+removeNA <-  enviro_raw %>% 
+    is.na() %>% 
+    which(.,arr.ind = T) %>% 
+    data.frame() %>% 
+    dplyr::select(row) %>% 
+    unique() %>% 
+    unlist()
+
+useless <- (apply(enviro_raw,2,var,na.rm = TRUE)==0) %>% which()
+
+# enviro <- enviro_raw[-removeNA,-useless]
+# enviro_future <- enviro_raw_future[-removeNA,-useless]
+enviro <- enviro_raw[-removeNA,]
+enviro_future <- enviro_raw_future[-removeNA,]
+sp_abun <- sp_abun_raw[-removeNA,]
+sp_pres <- sp_pres_raw[-removeNA,]
+
+```
+
+```{r,cache=TRUE}
+# Creating HMSC dataset for analyses
+HMSCdata <- as.HMSCdata(Y = sp_abun,
+                        X = enviro,
+                        Random = data.frame(sampling_unit = grid_boxes$ID[-removeNA]))
+
+
+rm(model)
+rm(HMSCpred)
+gc()
+model <- hmsc(HMSCdata)
+
+# future
+HMSCdata <- as.HMSCdata(Y = sp_abun,
+                        X = enviro_future,
+                        Random = data.frame(sampling_unit = grid_boxes$ID[-removeNA]))
+model_future <- hmsc(HMSCdata)
+
+```
+
+```{r,cache=TRUE}
+# Generate predictions
+HMSCpred <- cbind(grid_boxes[-removeNA,],predict(model))
+
+more.rows <- data.frame(ID=paste0("gb",sprintf("%03d", removeNA)), row.names = removeNA, stringsAsFactors=F)
+HMSCpred[(nrow(HMSCpred) + 1):(nrow(HMSCpred) + nrow(more.rows)), names(more.rows)] <- more.rows
+HMSCpred <- HMSCpred[order(as.numeric(substring(HMSCpred$ID,3))),]
+
+# future
+HMSCpred_future <- cbind(grid_boxes[-removeNA,],predict(model_future))
+
+more.rows <- data.frame(ID=paste0("gb",sprintf("%03d", removeNA)), row.names = removeNA, stringsAsFactors=F)
+HMSCpred_future[(nrow(HMSCpred_future) + 1):(nrow(HMSCpred_future) + nrow(more.rows)), names(more.rows)] <- more.rows
+HMSCpred_future <- HMSCpred_future[order(as.numeric(substring(HMSCpred_future$ID,3))),]
+
+```
+
+```{r,cache=TRUE}
+#### load con_mat data ####
+filenames <- list.files("data/con_mat", pattern="con_mat_per_.", full.names=F,recursive=F)
+
+con_mat_data <- lapply(filenames,function(x) as.matrix(assign(substr(x,1,nchar(x)-4),read.csv(paste0("data/con_mat/",x),row.names=1))))
+con_mat_data <- simplify2array(con_mat_data)
+con_mat_data_legend <- matrix(unlist(sapply(filenames,strsplit,"_")),nrow=length(filenames),byrow=T)
+con_mat_data_legend <- data.frame(cbind(type=substr(con_mat_data_legend[,4],1,1),
+                                year=substr(con_mat_data_legend[,4],2,5),
+                                PLD=substr(con_mat_data_legend[,6],1,nchar(con_mat_data_legend[,6])-4),
+                                time="Present"),
+                          stringsAsFactors=FALSE)
+con_mat_data_legend$time[con_mat_data_legend$year>2015] <- "Future"
+
+# function to get the right matrices
+get_matrix_fun <- function(con_mat_data,con_mat_data_legend,year=c(1998:2007,2098:2107),time=c("Present","Future"),PLD=c(0:17*7+1),FUN){
+    apply(con_mat_data[,,con_mat_data_legend$year%in%year&
+                   con_mat_data_legend$PLD%in%PLD&
+                   con_mat_data_legend$time%in%time], c(1,2), FUN)
+}
+```
+
+
+```{r,cache=TRUE}
+# resistance matrix
+# x=t(data.matrix(select(HMSCpred,-ID,-X.NA.,-geometry)))
+# c <- cor(x,use = "pairwise.complete.obs")
+
+HMSCpredsp <- HMSCpred %>% 
+    data.frame() %>% 
+    select(-ID,-X.NA.,-geometry)
+
+HMSCpredsp_future <- HMSCpred_future %>% 
+    data.frame() %>% 
+    select(-ID,-X.NA.,-geometry)
+
+growth_data <- expand.grid(species = names(HMSCpredsp), 
+                    prioritization = c("rand","hab","dist","mod","dist_hab","mod_hab"),
+                    pld = c(8,29,64,120), 
+                    reference = c("Present","Future"),
+                    growth=0)# %>% 
+    # mutate(pld = ifelse(connectivity!="mod",NA,pld)) %>% 
+    # unique()
+
+# Connectivity
+# 'treatment' connectivity
+# distance based
+distanceMatrix <- st_distance(st_centroid(grid_boxes))
+
+probabilityMatrix_distance <- 1/distanceMatrix^2
+probabilityMatrix_distance[is.infinite(probabilityMatrix_distance)] <- 0
+
+
+
+for(pld in unique(growth_data$pld)){
+    # Connectivity
+    # 'real' connectivity based on model
+    for(r in unique(growth_data$reference)){
+        probabilityMatrix_reference <- get_matrix_fun(con_mat_data,con_mat_data_legend,time=r,PLD=as.numeric(pld),FUN='mean')
+        
+        for(sp in unique(growth_data$species)){
+            
+            if(r=="Present"){
+                survival_reference <- as.numeric(unlist(HMSCpredsp[sp]))
+            } else {
+                survival_reference <- as.numeric(unlist(HMSCpredsp_future[sp]))
+            }
+            survival_reference[is.na(survival_reference)] <- 0
+            # fecundity for reference
+            fecundity_reference <- 1/Re(eigen(t(t(probabilityMatrix_reference)*survival_reference))$values[1])
+            flowMatrix_reference <- t(t(probabilityMatrix_reference)*survival_reference)*fecundity_reference
+            
+            for(p in unique(growth_data$prioritization)){
+                if(substring(p,nchar(p)-2)=="hab"){
+                    survival <- as.numeric(unlist(HMSCpredsp[sp]))
+                    survival[is.na(survival)] <- 0
+                } else {
+                    survival <- rep(1,nrow(HMSCpred))
+                }
+                
+                # 'treatment' connectivity
+                if(substring(p,1,4)=="dist"){
+                    # distance based
+                    probabilityMatrix <- probabilityMatrix_distance
+                } else if(substring(p,1,3)=="mod") {
+                    # model based
+                    if(r=="Present"){
+                        probabilityMatrix <- probabilityMatrix_reference
+                    } else {
+                        probabilityMatrix <- get_matrix_fun(con_mat_data,con_mat_data_legend,time="Future",PLD=as.numeric(pld),FUN='mean')
+                    }
+                } else {
+                    probabilityMatrix <- matrix(1,nrow=nrow(probabilityMatrix_reference),ncol=ncol(probabilityMatrix_reference))
+                }
+                # fecundity for treatment
+                fecundity <- 1/Re(eigen(t(t(probabilityMatrix)*survival))$values[1])
+                flowMatrix <- t(t(probabilityMatrix)*survival)*fecundity
+                
+                # Marxan selection type
+                if(p=="hab"){
+                    inreserve <- survival>quantile(survival,c(.90))
+                } else if(p=="rand") {
+                    inreserve <- sample(c(TRUE,FALSE),nrow(flowMatrix),replace=TRUE,prob=c(0.10,0.90))
+                } else {
+                    g <- graph_from_adjacency_matrix(flowMatrix,weighted=TRUE)
+                    centrality <- eigen_centrality(g)
+                    inreserve <- centrality$vector>quantile(centrality$vector,c(.90))
+                }
+                
+                # calculate growth rate
+                networkmatrix <- (flowMatrix_reference)[inreserve,inreserve]
+                growth_data$growth[growth_data$species==sp&
+                                       growth_data$pld==pld&
+                                       growth_data$prioritization==p&
+                                       growth_data$reference==r
+                                   ] <- Re(eigen(networkmatrix)$values[1])
+                print(paste(pld,sp,p,r))
+                
+            }
+        }
+    }
+}
+
+```
+
+```{r,cache=TRUE}
+# growth_data <- growth_data %>% 
+#     mutate(Type = paste(ifelse(connectivity=="dist","Distance",ifelse(connectivity=="mod","Model","")),
+#                                        ifelse(habitat==TRUE,"+ Habitat","")))
+
+ggplot(growth_data,aes(x=prioritization,y=growth, fill=reference))+
+    geom_boxplot()+
+    labs(x = "Prioritization Type",
+         y = "Relative Metapopulation Growth")+
+    scale_fill_brewer(type="qual",palette = "Paired")+
+    theme_classic()
+```
+
+
+```{r,cache=TRUE}
+# select all *hab and plot x=pld, facet=prioritization
+
+# growth_data <- growth_data %>% 
+#     mutate(Type = paste(ifelse(connectivity=="dist","Distance",ifelse(connectivity=="mod","Model","")),
+#                                        ifelse(habitat==TRUE,"+ Habitat","")))
+
+ggplot(growth_data %>% 
+           filter(grepl("*hab",prioritization)),
+       aes(x=as.factor(pld),y=growth,fill=reference))+
+    geom_boxplot()+
+    labs(x = "Prioritization Type",
+         y = "Relative Metapopulation Growth")+
+    scale_fill_brewer(type="qual",palette = "Paired")+
+    facet_grid(~prioritization)
+    theme_classic()
+```
+
+```{r}
+# resistance matrix
+x=t(data.matrix(select(HMSCpred,-ID,-X.NA.,-geometry)))
+c <- cor(t(HMSCpredsp),use = "pairwise.complete.obs")
+```
+

@@ -5,3 +5,8 @@
 data/con_mat/con_mat_*
 data/summaries/summary_*
 data/temperature/98_gb_his_0001.nc
+.httr-oauth
+.RDataTmp
+data/*
+figures/HMSC/*
+figures/OBIS/*
