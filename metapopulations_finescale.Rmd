@@ -385,13 +385,23 @@ for(pld in unique(growth_data$pld)){
 # growth_data <- growth_data %>% 
 #     mutate(Type = paste(ifelse(connectivity=="dist","Distance",ifelse(connectivity=="mod","Model","")),
 #                                        ifelse(habitat==TRUE,"+ Habitat","")))
+plot_data <- growth_data %>% 
+    mutate(prioritization=plyr::revalue(prioritization,c("rand" = "Random Selection",
+                                                         "hab" = "Representation Only",
+                                                         "dist" = "IBD Only",
+                                                         "mod" = "Model Only", 
+                                                         "dist_hab" = "Representation and IBD", 
+                                                         "mod_hab" = "Representation and Model")))
 
-ggplot(growth_data,aes(x=prioritization,y=growth, fill=reference))+
+
+
+ggplot(plot_data,aes(x=prioritization,y=growth))+
     geom_boxplot()+
     labs(x = "Prioritization Type",
          y = "Relative Metapopulation Growth")+
     scale_fill_brewer(type="qual",palette = "Paired")+
-    theme_classic()
+    theme_classic()+
+    theme(axis.text.x=element_text(angle=30,vjust=1,hjust=1))
 ```
 
 
@@ -402,20 +412,82 @@ ggplot(growth_data,aes(x=prioritization,y=growth, fill=reference))+
 #     mutate(Type = paste(ifelse(connectivity=="dist","Distance",ifelse(connectivity=="mod","Model","")),
 #                                        ifelse(habitat==TRUE,"+ Habitat","")))
 
-ggplot(growth_data %>% 
-           filter(grepl("*hab",prioritization)),
+plot_data <- growth_data %>% 
+           filter(grepl("*hab",prioritization)) %>% 
+                      mutate(prioritization=plyr::revalue(prioritization,c("hab" = "Representation Only", 
+                                                                     "dist_hab" = "Representation and IBD", 
+                                                                     "mod_hab" = "Representation and Model")))
+
+
+
+ggplot(plot_data,
        aes(x=as.factor(pld),y=growth,fill=reference))+
     geom_boxplot()+
-    labs(x = "Prioritization Type",
+    labs(x = "Planktonic Larval Duration (d)",
          y = "Relative Metapopulation Growth")+
     scale_fill_brewer(type="qual",palette = "Paired")+
-    facet_grid(~prioritization)
+    facet_grid(~prioritization)+
+    labs(fill="Climate")+
     theme_classic()
+        
+
 ```
 
 ```{r}
 # resistance matrix
-x=t(data.matrix(select(HMSCpred,-ID,-X.NA.,-geometry)))
-c <- cor(t(HMSCpredsp),use = "pairwise.complete.obs")
+# x=t(data.matrix(select(HMSCpred,-ID,-X.NA.,-geometry)))
+# c <- cor(t(HMSCpredsp),use = "pairwise.complete.obs")
+```
+
+
+```{r}
+c <- cor(HMSCpredsp,use = "pairwise.complete.obs")
+
+tail(colSums(sp_abun_raw)[order(colSums(sp_abun_raw))],20)
+
+# example_sp <- c("Sebastes.melanops","Pandalopsis.dispar","Phocoenoides.dalli","Pisaster.ochraceus","Apostichopus.californicus")
+
+example_sp <- sample(names(HMSCpredsp),5)
+# which(names(HMSCpredsp)%in%example_sp)
+
+# get basemap outline of AUS
+proj <- "+proj=lcc +lat_1=77 +lat_2=49 +lat_0=49 +lon_0=-95 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs "
+
+bb <- HMSCpred %>% 
+    st_bbox() %>% 
+    st_as_sfc() %>% 
+    st_transform(proj) 
+
+land <- rbind(getData(country="CAN",level=0),
+              getData(country="USA",level=0)) %>% 
+    st_as_sf() %>% 
+    st_transform(proj) %>% 
+    st_intersection(st_buffer(bb,100000))
+
+plot_data <- HMSCpred %>% 
+    select(gsub(" ",".",example_sp)) %>% 
+    gather(key = "species", value = "probability",example_sp) %>% 
+    mutate(species=gsub("\\."," ",species)) %>% 
+    group_by(species) %>% 
+    mutate(survival=(probability-min(probability))/(max(probability)-min(probability))) %>% 
+    ungroup()
+
+# hist(sqrt(plot_data$survival))
+
+ggplot(plot_data)+
+    geom_sf(data=land,fill="grey",colour="darkgrey")+
+    geom_sf(aes(fill=survival),colour="transparent",size=0.25)+
+    scale_fill_distiller("Relative Survival",palette="Oranges",direction = 1,trans = "sqrt")+
+    facet_grid(~species)+
+    coord_sf(xlim=st_bbox(HMSCpred)[c(1,3)],
+             ylim=st_bbox(HMSCpred)[c(2,4)],
+             crs=proj,
+             expand = FALSE)+
+    theme_dark()+
+    theme(legend.position = "top",
+          legend.direction = "horizontal") 
+```
+```{r}
+
 ```
 

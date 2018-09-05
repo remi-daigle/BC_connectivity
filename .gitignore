@@ -10,3 +10,6 @@ data/temperature/98_gb_his_0001.nc
 data/*
 figures/HMSC/*
 figures/OBIS/*
+obis_BC_eez.csv
+GADM_2.8_CAN_adm0.rds
+GADM_2.8_USA_adm0.rds
